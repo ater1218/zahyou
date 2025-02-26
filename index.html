@@ -1,0 +1,614 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>座標検出くん</title>
+    <!-- ローカルのOpenCVを読み込み -->
+    <script src="opencv.js"></script>
+    <style>
+        body {
+            font-family: 'Meiryo', 'Arial', sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            display: flex;
+            max-width: 1200px;
+            margin: 0 auto;
+            background-color: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }
+        .left-panel {
+            flex: 2;
+            padding: 20px;
+            border-right: 1px solid #eee;
+        }
+        .right-panel {
+            flex: 1;
+            padding: 20px;
+            background-color: #f9f9f9;
+        }
+        .preview-container {
+            margin-top: 20px;
+            text-align: center;
+        }
+        #preview {
+            max-width: 100%;
+            border: 1px solid #ddd;
+            margin-top: 10px;
+        }
+        .controls {
+            margin-bottom: 20px;
+        }
+        select, button {
+            padding: 8px 12px;
+            margin: 5px 0;
+            border-radius: 4px;
+            border: 1px solid #ccc;
+            background-color: white;
+            font-size: 14px;
+        }
+        button {
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            cursor: pointer;
+            transition: background-color 0.3s;
+            width: 100%;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+        #result {
+            width: 100%;
+            height: 300px;
+            border: 1px solid #ddd;
+            padding: 10px;
+            box-sizing: border-box;
+            font-family: monospace;
+            overflow-y: auto;
+            background-color: white;
+        }
+        .loading {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0,0,0,0.5);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+        }
+        .loading-content {
+            background-color: white;
+            padding: 20px;
+            border-radius: 5px;
+            text-align: center;
+        }
+        .spinner {
+            border: 5px solid #f3f3f3;
+            border-top: 5px solid #3498db;
+            border-radius: 50%;
+            width: 50px;
+            height: 50px;
+            animation: spin 2s linear infinite;
+            margin: 0 auto 10px auto;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        .hidden {
+            display: none;
+        }
+        .status-message {
+            text-align: center;
+            margin: 20px 0;
+            padding: 10px;
+            background-color: #f8f9fa;
+            border-radius: 4px;
+        }
+        .error {
+            color: #721c24;
+            background-color: #f8d7da;
+            border: 1px solid #f5c6cb;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="left-panel">
+            <h1>座標検出くん</h1>
+            <div id="opencv-status" class="status-message">OpenCV.jsを読み込み中...</div>
+            <div class="preview-container">
+                <h3>プレビュー</h3>
+                <canvas id="preview"></canvas>
+            </div>
+        </div>
+        <div class="right-panel">
+            <div class="controls">
+                <div>
+                    <label for="detection-mode">検出モード:</label>
+                    <select id="detection-mode">
+                        <option value="icon">アイコン検出</option>
+                        <option value="position">初期位置</option>
+                    </select>
+                </div>
+                <div>
+                    <button id="upload-btn">画像をアップロード</button>
+                    <input type="file" id="file-input" accept="image/*" style="display: none;">
+                </div>
+                <div>
+                    <button id="execute-btn" disabled>実行</button>
+                </div>
+            </div>
+            <h3>結果</h3>
+            <pre id="result">画像をアップロードして「実行」ボタンを押してください。</pre>
+        </div>
+    </div>
+    
+    <div id="loading" class="loading hidden">
+        <div class="loading-content">
+            <div class="spinner"></div>
+            <p>処理中...</p>
+        </div>
+    </div>
+
+    <script>
+        // OpenCVの読み込み完了を待つ
+        function onOpenCvReady() {
+            document.getElementById('loading').classList.add('hidden');
+            document.getElementById('opencv-status').textContent = 'OpenCV.js 準備完了';
+            setTimeout(() => {
+                document.getElementById('opencv-status').style.display = 'none';
+            }, 2000);
+            console.log('OpenCV.js is ready');
+        }
+
+        // OpenCVの読み込みエラー処理
+        function onOpenCvError() {
+            const statusElement = document.getElementById('opencv-status');
+            statusElement.textContent = 'OpenCV.jsの読み込みに失敗しました。ページを再読み込みするか、OpenCVファイルが正しく配置されているか確認してください。';
+            statusElement.classList.add('error');
+            console.error('Failed to load OpenCV.js');
+        }
+
+        // 変数を設定
+        let uploadedImage = null;
+        let processedImage = null;
+        
+        // アイコン検出のパラメータ
+        const iconParams = {
+            lowerRed1: [0, 120, 100],
+            upperRed1: [10, 255, 255],
+            lowerRed2: [160, 120, 100],
+            upperRed2: [180, 255, 255],
+            minWidth: 30,
+            maxWidth: 35,
+            minHeight: 35,
+            maxHeight: 40
+        };
+
+        // Y座標分析のパラメータ
+        const yCoordParams = {
+            targetYCoords: [1379, 1381, 1382, 1384, 1386, 1388, 1389, 1391, 1392, 1394, 1396, 1398, 1399, 1401, 1403, 1404, 1406, 1408, 1409, 1411, 1413, 1414, 1416, 1418, 1420, 1421, 1423, 1425, 1426, 1428, 1430, 1431, 1433, 1435, 1436, 1438, 1440, 1442, 1443, 1445, 1446, 1448, 1450, 1452, 1453, 1455, 1457, 1458, 1460, 1462, 1464, 1465, 1467, 1468, 1470, 1472, 1474, 1475, 1477, 1479, 1480, 1482, 1484, 1486, 1487, 1489, 1490, 1492, 1494, 1496, 1497, 1499, 1501, 1502, 1504, 1506, 1508, 1509, 1511, 1512, 1514, 1516, 1518, 1519, 1521, 1523, 1524, 1526, 1528, 1529],
+            xRanges: {
+                1: [215, 222, "1P"],
+                2: [431, 438, "2P"],
+                3: [648, 655, "3P"],
+                4: [864, 871, "4P"]
+            }
+        };
+
+        // DOM要素の参照を取得
+        const uploadBtn = document.getElementById('upload-btn');
+        const fileInput = document.getElementById('file-input');
+        const executeBtn = document.getElementById('execute-btn');
+        const detectionMode = document.getElementById('detection-mode');
+        const resultText = document.getElementById('result');
+        const previewCanvas = document.getElementById('preview');
+        const loadingElement = document.getElementById('loading');
+
+        // ファイルアップロードボタンのイベントリスナー
+        uploadBtn.addEventListener('click', () => {
+            fileInput.click();
+        });
+
+        // ファイル選択時のイベントリスナー
+        fileInput.addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            if (file) {
+                const reader = new FileReader();
+                reader.onload = (event) => {
+                    const img = new Image();
+                    img.onload = () => {
+                        uploadedImage = img;
+                        drawImage(img);
+                        executeBtn.disabled = false;
+                    };
+                    img.src = event.target.result;
+                };
+                reader.readAsDataURL(file);
+            }
+        });
+
+        // 実行ボタンのイベントリスナー
+        executeBtn.addEventListener('click', () => {
+            if (!uploadedImage) return;
+            
+            loadingElement.classList.remove('hidden');
+            
+            // 非同期処理を使用して UI ブロックを防ぐ
+            setTimeout(() => {
+                try {
+                    const mode = detectionMode.value;
+                    if (mode === 'icon') {
+                        const results = detectPlayerIcon(uploadedImage);
+                        displayIconResults(results);
+                        visualizeIconResults(uploadedImage, results);
+                    } else {
+                        const results = analyzeYCoordinates(uploadedImage);
+                        displayYCoordResults(results);
+                        visualizeYCoordResults(uploadedImage, results);
+                    }
+                } catch (error) {
+                    resultText.textContent = `エラーが発生しました: ${error.message}`;
+                    console.error(error);
+                } finally {
+                    loadingElement.classList.add('hidden');
+                }
+            }, 100);
+        });
+
+        // キャンバスに画像を描画
+        function drawImage(img, processed = false) {
+            const ctx = previewCanvas.getContext('2d');
+            
+            // 入力画像のサイズからキャンバスのサイズを決定
+            const maxWidth = document.querySelector('.left-panel').clientWidth - 40;
+            
+            let displayWidth, displayHeight;
+            
+            if (processed) {
+                // 処理済み画像の表示
+                displayWidth = Math.min(img.cols, maxWidth);
+                displayHeight = (img.rows * displayWidth) / img.cols;
+                
+                previewCanvas.width = displayWidth;
+                previewCanvas.height = displayHeight;
+                
+                // OpenCV Matをキャンバスに描画
+                cv.imshow('preview', img);
+            } else {
+                // 元の画像の表示
+                displayWidth = Math.min(img.width, maxWidth);
+                displayHeight = (img.height * displayWidth) / img.width;
+                
+                previewCanvas.width = displayWidth;
+                previewCanvas.height = displayHeight;
+                
+                ctx.clearRect(0, 0, previewCanvas.width, previewCanvas.height);
+                ctx.drawImage(img, 0, 0, displayWidth, displayHeight);
+            }
+        }
+
+        // アイコン検出機能
+        function detectPlayerIcon(img) {
+            // 画像をOpenCV形式に変換
+            const src = cv.imread(img);
+            const hsv = new cv.Mat();
+            cv.cvtColor(src, hsv, cv.COLOR_RGBA2RGB);
+            cv.cvtColor(hsv, hsv, cv.COLOR_RGB2HSV);
+            
+            // 赤色マスクの作成 (2つの範囲)
+            const mask1 = new cv.Mat();
+            const mask2 = new cv.Mat();
+            const mask = new cv.Mat();
+            
+            const lowerRed1 = new cv.Mat(1, 3, cv.CV_8UC1);
+            lowerRed1.data.set(iconParams.lowerRed1);
+            const upperRed1 = new cv.Mat(1, 3, cv.CV_8UC1);
+            upperRed1.data.set(iconParams.upperRed1);
+            
+            const lowerRed2 = new cv.Mat(1, 3, cv.CV_8UC1);
+            lowerRed2.data.set(iconParams.lowerRed2);
+            const upperRed2 = new cv.Mat(1, 3, cv.CV_8UC1);
+            upperRed2.data.set(iconParams.upperRed2);
+            
+            cv.inRange(hsv, lowerRed1, upperRed1, mask1);
+            cv.inRange(hsv, lowerRed2, upperRed2, mask2);
+            cv.bitwise_or(mask1, mask2, mask);
+            
+            // モルフォロジー変換
+            const kernel = cv.Mat.ones(3, 3, cv.CV_8U);
+            const temp = new cv.Mat();
+            cv.morphologyEx(mask, temp, cv.MORPH_OPEN, kernel);
+            cv.morphologyEx(temp, mask, cv.MORPH_CLOSE, kernel);
+            
+            // 輪郭検出
+            const contours = new cv.MatVector();
+            const hierarchy = new cv.Mat();
+            cv.findContours(mask, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+            
+            // 結果の収集
+            const results = [];
+            for (let i = 0; i < contours.size(); i++) {
+                const contour = contours.get(i);
+                const rect = cv.boundingRect(contour);
+                const w = rect.width;
+                const h = rect.height;
+                const x = rect.x + w / 2;
+                const y = rect.y;
+                
+                if (iconParams.minWidth <= w && w <= iconParams.maxWidth && 
+                    iconParams.minHeight <= h && h <= iconParams.maxHeight) {
+                    results.push({
+                        x: Math.round(x),
+                        y: Math.round(y),
+                        width: Math.round(w),
+                        height: Math.round(h),
+                        confidence: cv.contourArea(contour)
+                    });
+                }
+                contour.delete();
+            }
+            
+            // メモリ解放
+            src.delete();
+            hsv.delete();
+            mask1.delete();
+            mask2.delete();
+            mask.delete();
+            lowerRed1.delete();
+            upperRed1.delete();
+            lowerRed2.delete();
+            upperRed2.delete();
+            kernel.delete();
+            temp.delete();
+            contours.delete();
+            hierarchy.delete();
+            
+            // 結果をx, y座標でソート
+            results.sort((a, b) => {
+                if (a.x !== b.x) return a.x - b.x;
+                return a.y - b.y;
+            });
+            
+            return results;
+        }
+
+        // アイコン検出の結果を表示
+        function displayIconResults(results) {
+            if (results.length > 0) {
+                let text = "検出結果:\n\n";
+                for (let i = 0; i < results.length; i++) {
+                    const result = results[i];
+                    text += `検出 ${i+1}:\n`;
+                    text += `  上辺中心座標: (${result.x}, ${result.y})\n`;
+                    text += `  サイズ: ${result.width}x${result.height}\n`;
+                    text += `  信頼度: ${result.confidence.toFixed(2)}\n\n`;
+                }
+                resultText.textContent = text;
+            } else {
+                resultText.textContent = "指定されたサイズ範囲のアイコンが検出されませんでした";
+            }
+        }
+
+        // アイコン検出の結果を可視化
+        function visualizeIconResults(img, results) {
+            const src = cv.imread(img);
+            
+            // 検出結果を描画
+            for (const result of results) {
+                const x = result.x;
+                const y = result.y;
+                const w = result.width;
+                const h = result.height;
+                
+                // 矩形を描画
+                const pt1 = new cv.Point(x - Math.floor(w/2), y);
+                const pt2 = new cv.Point(x + Math.floor(w/2), y + h);
+                cv.rectangle(src, pt1, pt2, [0, 255, 0, 255], 2);
+                
+                // 中心点を描画
+                const center = new cv.Point(x, y);
+                cv.circle(src, center, 3, [0, 0, 255, 255], -1);
+                
+                // テキストを描画
+                const text = `(${x}, ${y}) ${w}x${h}`;
+                const textOrg = new cv.Point(x + 10, y + 10);
+                cv.putText(src, text, textOrg, cv.FONT_HERSHEY_SIMPLEX, 0.5, [0, 255, 0, 255], 2);
+            }
+            
+            // 処理済み画像を表示
+            drawImage(src, true);
+            
+            // 画像をグローバル変数に保存
+            processedImage = src;
+        }
+
+        // Y座標分析機能
+        function analyzeYCoordinates(img) {
+            const src = cv.imread(img);
+            const results = {};
+            
+            // 各プレイヤー位置を分析
+            for (const [playerNum, rangeData] of Object.entries(yCoordParams.xRanges)) {
+                const [xStart, xEnd, playerLabel] = rangeData;
+                
+                // 画像を範囲でクロップ
+                const rect = new cv.Rect(xStart, 1370, xEnd - xStart + 1, 180);
+                const cropped = src.roi(rect);
+                
+                // グレースケールに変換して二値化
+                const gray = new cv.Mat();
+                const bw = new cv.Mat();
+                cv.cvtColor(cropped, gray, cv.COLOR_RGBA2GRAY);
+                cv.threshold(gray, bw, 128, 255, cv.THRESH_BINARY);
+                
+                // 白→黒のパターンを検出
+                let playerResult = null;
+                const width = bw.cols;
+                const height = bw.rows;
+                
+                for (let x = 0; x < width; x++) {
+                    let whiteCount = 0;
+                    let blackCount = 0;
+                    
+                    for (let y = 0; y < height; y++) {
+                        const pixelValue = bw.ucharPtr(y, x)[0];
+                        
+                        if (pixelValue === 255) {  // 白ピクセル
+                            whiteCount++;
+                            blackCount = 0;
+                        } else {  // 黒ピクセル
+                            if (whiteCount >= 4) {
+                                blackCount++;
+                                if (blackCount === 8) {
+                                    const yCoord = y - 7 + 1370;
+                                    const nearestTarget = findNearestTarget(yCoord, yCoordParams.targetYCoords);
+                                    playerResult = [yCoord, nearestTarget];
+                                    break;
+                                }
+                            } else {
+                                whiteCount = 0;
+                                blackCount = 0;
+                            }
+                        }
+                    }
+                    
+                    if (playerResult) break;
+                }
+                
+                results[playerLabel] = playerResult;
+                
+                // メモリ解放
+                cropped.delete();
+                gray.delete();
+                bw.delete();
+            }
+            
+            // 画像をグローバル変数に保存（可視化のため）
+            processedImage = src;
+            
+            return results;
+        }
+
+        // Y座標分析の結果を表示
+        function displayYCoordResults(results) {
+            let text = "Y座標分析結果:\n\n";
+            
+            for (const [player, result] of Object.entries(results)) {
+                if (result) {
+                    const [originalY, targetY] = result;
+                    const index = yCoordParams.targetYCoords.indexOf(targetY) + 1;
+                    
+                    if (originalY === targetY) {
+                        text += `${player}: ${index}\n`;
+                    } else {
+                        text += `${player}: ${index} (元のy座標: ${originalY})\n`;
+                    }
+                } else {
+                    text += `${player}: 条件を満たす結果が見つかりませんでした\n`;
+                }
+            }
+            
+            resultText.textContent = text;
+        }
+
+        // Y座標分析の結果を可視化
+        function visualizeYCoordResults(img, results) {
+            const src = cv.imread(img);
+            
+            for (const [player, result] of Object.entries(results)) {
+                if (result) {
+                    const [yCoord, targetY] = result;
+                    const playerNum = parseInt(player[0]);
+                    const [xStart, xEnd, _] = yCoordParams.xRanges[playerNum];
+                    const xCenter = Math.floor((xStart + xEnd) / 2);
+                    
+                    // 中心点を描画
+                    const center = new cv.Point(xCenter, yCoord);
+                    cv.circle(src, center, 3, [0, 0, 255, 255], -1);
+                    
+                    // 水平線を描画
+                    const pt1 = new cv.Point(xStart, yCoord);
+                    const pt2 = new cv.Point(xEnd, yCoord);
+                    cv.line(src, pt1, pt2, [0, 255, 0, 255], 1);
+                    
+                    // テキストを描画
+                    const index = yCoordParams.targetYCoords.indexOf(targetY) + 1;
+                    const text = `${player}: ${index}`;
+                    const textOrg = new cv.Point(xEnd + 5, yCoord);
+                    cv.putText(src, text, textOrg, cv.FONT_HERSHEY_SIMPLEX, 0.5, [0, 255, 0, 255], 1);
+                }
+            }
+            
+            // プレビュー領域に表示するためにクロップと拡大
+            const yStart = 350;
+            const cropHeight = Math.min(1380, src.rows - yStart);
+            const rect = new cv.Rect(0, yStart, src.cols, cropHeight);
+            const cropped = src.roi(rect);
+            
+            const dst = new cv.Mat();
+            const dsize = new cv.Size(Math.round(cropped.cols * 1.5), Math.round(cropped.rows * 1.5));
+            cv.resize(cropped, dst, dsize, 0, 0, cv.INTER_LINEAR);
+            
+            // 処理済み画像を表示
+            drawImage(dst, true);
+            
+            // メモリ解放
+            cropped.delete();
+            src.delete();
+            
+            // グローバル変数に保存
+            processedImage = dst;
+        }
+
+        // 最も近い目標Y座標を見つける
+        function findNearestTarget(y, targets) {
+            let nearest = targets[0];
+            let minDist = Math.abs(y - nearest);
+            
+            for (let i = 1; i < targets.length; i++) {
+                const dist = Math.abs(y - targets[i]);
+                if (dist < minDist) {
+                    minDist = dist;
+                    nearest = targets[i];
+                }
+            }
+            
+            return nearest;
+        }
+
+        // OpenCVの読み込み完了時にUIを有効化
+        window.onload = function() {
+            // OpenCVの読み込みステータスをチェック
+            if (typeof cv !== 'undefined' && cv.getBuildInformation) {
+                onOpenCvReady();
+            } else {
+                // OpenCVがまだ読み込まれていない場合は、イベントリスナーを設定
+                cv = {};
+                cv['onRuntimeInitialized'] = onOpenCvReady;
+                
+                // 読み込み失敗時のタイムアウト処理
+                setTimeout(() => {
+                    if (typeof cv === 'undefined' || !cv.getBuildInformation) {
+                        onOpenCvError();
+                    }
+                }, 5000);
+            }
+        };
+    </script>
+</body>
+</html>
